@@ -23,14 +23,13 @@ edge 0:flow
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
 {
-  if (code != cudaSuccess) 
-    {
-      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
-      if (abort) exit(code);
-    }
+  if (code != cudaSuccess) {
+    fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+    if (abort) exit(code);
+  }
 }
   
-#define NODE 5
+#define NODE 7
 #define EDGE 7
 
 #define NADR(NUM, ID, EL) (NUM * EL + ID)
@@ -42,6 +41,8 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 #define OUT_ROOT 2
 #define IN_ROOT 3
 #define ST_FLG 4
+#define ACTIVE 5
+#define N_ROUTE 6
 
 //edge
 #define FLOW 0
@@ -62,44 +63,60 @@ int *sink;
 void link(int e_table, int from, int to, int r_edge, int flow);
 int load(FILE *fp);
 
-__global__ void node_reset(int *n_table, int *e_table, int *source, int *sink, int *N_NUM, int *E_NUM, int *e_flg) {
+__global__ void first_reset(int *n_table, int *e_table, int *source, int *sink, int *N_NUM, int *E_NUM) {
   int total_id = blockDim.x * blockIdx.x + threadIdx.x;
-  e_flg[total_id] = 0;
   if (total_id >= N_NUM[0]) return;
   if (total_id == source[0]) {
     n_table[NADR(N_NUM[0], total_id, STATE)] = 1;
     n_table[NADR(N_NUM[0], total_id, HEIGHT)] = 0;
+    n_table[NADR(N_NUM[0], total_id, ACTIVE)] = 0;
+    n_table[NADR(N_NUM[0], total_id, N_ROUTE)] = 0;
     return;
   }
   else if (total_id == sink[0]) {
     n_table[NADR(N_NUM[0], total_id, STATE)] = 2;
     n_table[NADR(N_NUM[0], total_id, HEIGHT)] = 0;
+    n_table[NADR(N_NUM[0], total_id, ACTIVE)] = 0;
+    n_table[NADR(N_NUM[0], total_id, N_ROUTE)] = 0;
+    return;
+  }
+  else if (n_table[NADR(N_NUM[0], total_id, ST_FLG)] != -1) {
+    int f_flg = n_table[NADR(N_NUM[0], total_id, ST_FLG)];
+    int in_node = e_table[EADR(E_NUM[0], f_flg, IN_NODE)];
+    n_table[NADR(N_NUM[0], total_id, HEIGHT)] = 1;
+    n_table[NADR(N_NUM[0], total_id, ACTIVE)] = 1;
+    n_table[NADR(N_NUM[0], total_id, N_ROUTE)] = 1;
+    if (in_node == source[0]) n_table[NADR(N_NUM[0], total_id, STATE)] = 1;
+    else n_table[NADR(N_NUM[0], total_id, STATE)] = 2;
+  }
+}
+
+__global__ void node_reset(int *n_table, int *e_table, int *source, int *sink, int *N_NUM, int *E_NUM, int *e_flg) {
+  int total_id = blockDim.x * blockIdx.x + threadIdx.x;
+  if (total_id >= N_NUM[0]) return;
+  if (total_id == source[0] || total_id == sink[0]) return;
+  if (n_table[NADR(N_NUM[0], total_id, ST_FLG)] == -1) {
+    n_table[NADR(N_NUM[0], total_id, HEIGHT)] = N_NUM[0];
+    n_table[NADR(N_NUM[0], total_id, STATE)] = 0;
+    n_table[NADR(N_NUM[0], total_id, ACTIVE)] = 0;
+    n_table[NADR(N_NUM[0], total_id, N_ROUTE)] = 0;
     return;
   }
   else {
-    if (n_table[NADR(N_NUM[0], total_id, ST_FLG)] == -1) {
+    n_table[NADR(N_NUM[0], total_id, ACTIVE)] = 1;
+    int f_flg = n_table[NADR(N_NUM[0], total_id, ST_FLG)];
+    if (e_table[EADR(E_NUM[0], f_flg, FLOW)] == 0) {
       n_table[NADR(N_NUM[0], total_id, HEIGHT)] = N_NUM[0];
       n_table[NADR(N_NUM[0], total_id, STATE)] = 0;
-      return;
-    }
-    else {
-      int f_flg = n_table[NADR(N_NUM[0], total_id, ST_FLG)];
-      if (e_table[EADR(E_NUM[0], f_flg, FLOW)] > 0) {
-	int in_node = e_table[EADR(E_NUM[0], f_flg, IN_NODE)];
-	n_table[NADR(N_NUM[0], total_id, HEIGHT)] = 1;
-	if (in_node == source[0]) n_table[NADR(N_NUM[0], total_id, STATE)] = 1;
-	else n_table[NADR(N_NUM[0], total_id, STATE)] = 2;
-      }
-      else {
-	n_table[NADR(N_NUM[0], total_id, HEIGHT)] = N_NUM[0];
-	n_table[NADR(N_NUM[0], total_id, STATE)] = 0;
-	n_table[NADR(N_NUM[0], total_id, ST_FLG)] = -1;
-      }
+      n_table[NADR(N_NUM[0], total_id, ACTIVE)] = 0;
+      n_table[NADR(N_NUM[0], total_id, N_ROUTE)] = 0;
+      n_table[NADR(N_NUM[0], total_id, ST_FLG)] = -1;
     }
   }
 }
 
-__global__ void trace_cu(int *n_table, int *e_table, int *flg3, int *que3, int *N_NUM, int *E_NUM, int *cnt, int *flg1, int *e_flg) {
+__global__ void trace_cu(int *n_table, int *e_table, int *flg3, int *que3, int *N_NUM, int *E_NUM, int *flg1, int *e_flg) {
+  flg1[0] = 0;
   int node_id = blockDim.x * blockIdx.x + threadIdx.x;
   if (node_id >= N_NUM[0]) return;
 
@@ -108,7 +125,7 @@ __global__ void trace_cu(int *n_table, int *e_table, int *flg3, int *que3, int *
   __shared__ int e_num[1];
   e_num[0] = E_NUM[0];
 
-  if (n_table[NADR(n_num[0], node_id, HEIGHT)] != cnt[0]) return;
+  if (n_table[NADR(n_num[0], node_id, ACTIVE)] != 1) return;
   int state, look_n, root, link;
   if (n_table[NADR(n_num[0], node_id, STATE)] == 1) {
     state = 1;
@@ -127,16 +144,21 @@ __global__ void trace_cu(int *n_table, int *e_table, int *flg3, int *que3, int *
   int edge_id = n_table[NADR(n_num[0], node_id, root)];
   for (;;) {
     for (;;) {
-      if (edge_id == -1) return;
+      if (edge_id == -1) {
+	n_table[NADR(n_num[0], node_id, ACTIVE)] = 0;
+	return;
+      }
       if (e_table[EADR(e_num[0], edge_id, FLOW)] > 0) break;
       edge_id = e_table[EADR(e_num[0], edge_id, link)];
     }
     lok_node = e_table[EADR(e_num[0], edge_id, look_n)];
     if (n_table[NADR(n_num[0], lok_node, STATE)] == 0) {
-      old = atomicExch(&e_flg[lok_node], 1);
+      //old = atomicExch(&e_flg[lok_node], 1);
+      old = atomicAdd(&n_table[NADR(n_num[0], lok_node, N_ROUTE)], 1);
       if (old == 0) {
 	n_table[NADR(n_num[0], lok_node, STATE)] = state;
 	n_table[NADR(n_num[0], lok_node, HEIGHT)] = n_table[NADR(n_num[0], node_id, HEIGHT)] + 1;
+	n_table[NADR(n_num[0], lok_node, ACTIVE)] = 1;
 	flg1[0] = 1;
       }
     }
@@ -148,24 +170,40 @@ __global__ void trace_cu(int *n_table, int *e_table, int *flg3, int *que3, int *
   }
 }
 
-__device__ void flow_t(int *e_table, int flow, int pre_edge, int edge, int N_NUM, int E_NUM, int tag, int *e_flg) {
-  atomicSub(&e_table[EADR(E_NUM, edge, FLOW)], flow);
+__device__ void flow_t(int *n_table, int *e_table, int flow, int pre_edge, int edge, int N_NUM, int E_NUM, int tag, int *flg1) {
+  int link = IN_NODE;
+
+  int old = atomicSub(&e_table[EADR(E_NUM, edge, FLOW)], flow);
   int reverse = e_table[EADR(E_NUM, edge, REVERSE)];
   atomicAdd(&e_table[EADR(E_NUM, reverse, FLOW)], flow);
+  int l_node = e_table[EADR(E_NUM, edge, link)];
+  if (old == flow) {
+    old = atomicSub(&n_table[NADR(N_NUM, l_node, N_ROUTE)], 1);
+    if (old == 1) atomicAdd(&flg1[0], 1);
+  }
 
   for (;;) {
-    atomicSub(&e_table[EADR(E_NUM, pre_edge, FLOW)], flow);
+    old = atomicSub(&e_table[EADR(E_NUM, pre_edge, FLOW)], flow);
     reverse = e_table[EADR(E_NUM, pre_edge, REVERSE)];
     atomicAdd(&e_table[EADR(E_NUM, reverse, FLOW)], flow);
-    if (pre_edge == tag) break;
+    if (pre_edge == tag) {
+      if (old == flow) atomicAdd(&flg1[0], 1);
+      break;
+    }
+    l_node = e_table[EADR(E_NUM, edge, link)];
+    if (l_node == e_table[EADR(E_NUM, tag, link)]) link = OUT_NODE;
+    if (old == flow) {
+      old = atomicSub(&n_table[NADR(N_NUM, l_node, N_ROUTE)], 1);
+      if (old == 1) atomicAdd(&flg1[0], 1);
+    }
     pre_edge = e_table[EADR(E_NUM, pre_edge, ROUTE)];
   }
 }
 
-__global__ void aug_cu(int *n_table, int *e_table, int *flg1, int *que1, int *source, int *sink, int *e_flg, int *flow_sum, int *N_NUM, int *E_NUM) {
+__global__ void aug_cu(int *n_table, int *e_table, int *flg3, int *que3, int *source, int *sink, int *e_flg, int *flow_sum, int *N_NUM, int *E_NUM, int *flg1) {
   int total_id = blockDim.x * blockIdx.x + threadIdx.x;
-  if (total_id >= flg1[0]) return;
-  int tag = que1[total_id];
+  if (total_id >= flg3[0]) return;
+  int tag = que3[total_id];
   int old = atomicExch(&e_flg[tag], 1);
   if (old != 0) return;
   int pre_edge = tag;
@@ -173,24 +211,18 @@ __global__ void aug_cu(int *n_table, int *e_table, int *flg1, int *que1, int *so
   __shared__ int n_num[1];
   n_num[0] = N_NUM[0];
   __shared__ int e_num[1];
-  e_num[0] = E_NUM[0];
 
-  int node = e_table[EADR(e_num[0], tag, IN_NODE)];
+  e_num[0] = E_NUM[0];
   int flow = e_table[EADR(e_num[0], tag, FLOW)];
-  int root, look_n, link;
+  if (flow == 0) return;
+  int node = e_table[EADR(e_num[0], tag, IN_NODE)];
   int state = 1;
   int height = n_table[NADR(N_NUM[0], node, HEIGHT)] - 1;
+
+  int root = IN_ROOT;
+  int look_n = IN_NODE;
+  int link = IN_LINK;
   for (;;) {
-    if (state == 1) {
-      root = IN_ROOT;
-      look_n = IN_NODE;
-      link = IN_LINK;
-    }
-    else {
-      root = OUT_ROOT;
-      look_n = OUT_NODE;
-      link = OUT_LINK;
-    }
     int edge_id = n_table[NADR(n_num[0], node, root)];
     int flow1;
     int lok_node;
@@ -212,7 +244,7 @@ __global__ void aug_cu(int *n_table, int *e_table, int *flg1, int *que1, int *so
       edge_id = e_table[EADR(e_num[0], edge_id, link)];
     }
     if (lok_node == sink[0]) {
-      flow_t(e_table, flow, pre_edge, edge_id, n_num[0], e_num[0], tag, e_flg);
+      flow_t(n_table, e_table, flow, pre_edge, edge_id, n_num[0], e_num[0], tag, flg1);
       atomicAdd(&flow_sum[0], flow);
       return;
     }
@@ -220,6 +252,10 @@ __global__ void aug_cu(int *n_table, int *e_table, int *flg1, int *que1, int *so
       node = e_table[EADR(e_num[0], tag, OUT_NODE)];
       height = n_table[NADR(n_num[0], node, HEIGHT)] - 1;
       state = 2;
+
+      root = OUT_ROOT;
+      look_n = OUT_NODE;
+      link = OUT_LINK;
     }
     else {
       node = lok_node;
@@ -232,10 +268,6 @@ __global__ void aug_cu(int *n_table, int *e_table, int *flg1, int *que1, int *so
 
 __global__ void flg_reset(int *flg) {
   flg[0] = 0;
-}
-
-__global__ void cnt_add(int *cnt) {
-  cnt[0]++;
 }
 
 int main(int argc, char **argv) {
@@ -303,34 +335,33 @@ int main(int argc, char **argv) {
   start = clock();
 
   flg_reset<<<1, 1>>>(dflow_sum);//flow_sumを初期化
+  first_reset<<<(N_NUM[0] / 32) + 1, 32>>>(nd_table, ed_table, d_source, d_sink, DN_NUM, DE_NUM);
   for (;;) {
     flg_reset<<<1, 1>>>(d_flg3);
-    flg_reset<<<1, 1>>>(d_cnt);
     node_reset<<<(N_NUM[0] / 32) + 1, 32>>>(nd_table, ed_table, d_source, d_sink, DN_NUM, DE_NUM, de_flg);
     gpuErrchk( cudaThreadSynchronize() );
     //growth stage
     for (;;) {
-      flg_reset<<<1, 1>>>(d_flg1);
-      cnt_add<<<1, 1>>>(d_cnt);
-      gpuErrchk( cudaThreadSynchronize() );
-      trace_cu<<<((N_NUM[0]) / 128) + 1, 128>>>(nd_table, ed_table, d_flg3, d_que3, DN_NUM, DE_NUM, d_cnt, d_flg1, de_flg);
+      trace_cu<<<(N_NUM[0] / 56) + 1, 56>>>(nd_table, ed_table, d_flg3, d_que3, DN_NUM, DE_NUM, d_flg1, de_flg);
       gpuErrchk( cudaThreadSynchronize() );
       gpuErrchk( cudaMemcpy(flg1, d_flg1, C_SIZE, cudaMemcpyDeviceToHost) );
       if (flg1[0] == 0) break;
     }
 
     //ぶつかったエッジがあったかを確認
-    gpuErrchk( cudaMemcpy(flg3, d_flg3, sizeof(int), cudaMemcpyDeviceToHost) );
+    gpuErrchk( cudaMemcpy(flg3, d_flg3, C_SIZE, cudaMemcpyDeviceToHost) );
     if (flg3[0] == 0) break;
 
     //augmentation stage
     for (int i = 0; i < 3; i++) {
       gpuErrchk( cudaMemset((void**)de_flg, 0, sizeof(int) * E_NUM[0] * 2) );
-      aug_cu<<<flg3[0] / 32 + 1, 32>>>(nd_table, ed_table, d_flg3, d_que3, d_source, d_sink, de_flg, dflow_sum, DN_NUM, DE_NUM);
+      aug_cu<<<(flg3[0] / 32) + 1, 32>>>(nd_table, ed_table, d_flg3, d_que3, d_source, d_sink, de_flg, dflow_sum, DN_NUM, DE_NUM, d_flg1);
       gpuErrchk( cudaThreadSynchronize() );
     }
 
-    gpuErrchk( cudaMemcpy(flow_sum, dflow_sum, sizeof(int), cudaMemcpyDeviceToHost) );
+    gpuErrchk( cudaMemcpy(flg1, d_flg1, C_SIZE, cudaMemcpyDeviceToHost) );
+
+    gpuErrchk( cudaMemcpy(flow_sum, dflow_sum, C_SIZE, cudaMemcpyDeviceToHost) );
     printf("current_flow : %d\n", flow_sum[0]);
   }
 
